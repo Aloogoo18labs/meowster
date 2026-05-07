@@ -122,3 +122,65 @@ class Candle:
     ts: int  # unix seconds
     open: float
     high: float
+    low: float
+    close: float
+    volume: float
+
+    def typical_price(self) -> float:
+        return (self.high + self.low + self.close) / 3.0
+
+
+@dataclasses.dataclass(frozen=True)
+class Quote:
+    ts: int
+    price: float
+    spread_bps: float
+
+
+@dataclasses.dataclass(frozen=True)
+class Symbol:
+    base: str
+    quote: str
+
+    @property
+    def id(self) -> str:
+        return f"{self.base}/{self.quote}"
+
+
+@dataclasses.dataclass(frozen=True)
+class Order:
+    order_id: str
+    symbol: str
+    side: str  # "buy" | "sell"
+    qty: float
+    limit_price: float | None
+    time_in_force: str  # "IOC" | "GTC"
+    created_ts: int
+    client_tag: str
+
+
+@dataclasses.dataclass(frozen=True)
+class Fill:
+    order_id: str
+    symbol: str
+    side: str
+    qty: float
+    price: float
+    fee: float
+    ts: int
+    liquidity: str  # "maker" | "taker"
+
+
+@dataclasses.dataclass
+class Position:
+    symbol: str
+    qty: float = 0.0
+    avg_price: float = 0.0  # in quote asset
+    realized_pnl: float = 0.0
+
+    def apply_fill(self, fill: Fill) -> None:
+        if fill.symbol != self.symbol:
+            raise ValueError("symbol mismatch")
+        signed_qty = fill.qty if fill.side == "buy" else -fill.qty
+        new_qty = self.qty + signed_qty
+        if abs(new_qty) < 1e-12:
