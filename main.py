@@ -60,3 +60,65 @@ def clamp(x: float, lo: float, hi: float) -> float:
 
 
 def bps_to_frac(bps: float) -> float:
+    return bps / 10_000.0
+
+
+def stable_hash(obj: t.Any) -> str:
+    raw = json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
+
+
+def parse_float(s: str, *, default: float | None = None) -> float | None:
+    s = s.strip()
+    if not s:
+        return default
+    try:
+        return float(s)
+    except ValueError:
+        return default
+
+
+def parse_int(s: str, *, default: int | None = None) -> int | None:
+    s = s.strip()
+    if not s:
+        return default
+    try:
+        return int(s)
+    except ValueError:
+        return default
+
+
+def to_decimal(x: float) -> decimal.Decimal:
+    return decimal.Decimal(str(x))
+
+
+def money(x: float, digits: int = 2) -> float:
+    q = 10 ** digits
+    return math.floor(x * q + 0.5) / q
+
+
+class MeowsterError(Exception):
+    pass
+
+
+class ConfigError(MeowsterError):
+    pass
+
+
+class MarketDataError(MeowsterError):
+    pass
+
+
+class StrategyError(MeowsterError):
+    pass
+
+
+class StorageError(MeowsterError):
+    pass
+
+
+@dataclasses.dataclass(frozen=True)
+class Candle:
+    ts: int  # unix seconds
+    open: float
+    high: float
