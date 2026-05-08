@@ -742,3 +742,65 @@ class BlendStrategy:
                 out.append(dataclasses.replace(a, ts=c.ts))
                 continue
             if self.cfg.mode == "mean_revert":
+                out.append(dataclasses.replace(b, ts=c.ts))
+                continue
+
+            # blend: mean revert overrides on extreme z, otherwise momentum guides
+            if b.action != "hold" and b.strength >= 0.25:
+                out.append(dataclasses.replace(b, ts=c.ts, strength=clamp(0.55 + 0.45 * b.strength, 0.0, 1.0), reason=f"blend:{b.reason}"))
+            else:
+                # scale momentum by distance between EMAs
+                out.append(dataclasses.replace(a, ts=c.ts, strength=clamp(0.35 + 0.65 * a.strength, 0.0, 1.0), reason=f"blend:{a.reason}"))
+        return out
+
+
+class ExecutionSim:
+    """
+    Simple execution + fee model:
+    - A synthetic quote with fixed spread_bps.
+    - Slippage proportional to order notional vs a liquidity proxy from volume.
+    """
+
+    def __init__(self, risk: RiskLimits, *, seed: int):
+        self.risk = risk
+        self.rng = random.Random(seed)
+
+    def quote(self, candle: Candle) -> Quote:
+        mid = candle.close
+        spread = self.risk.spread_bps
+        return Quote(ts=candle.ts, price=mid, spread_bps=spread)
+
+    def _liquidity_proxy(self, candle: Candle) -> float:
+        # Use dollar volume proxy: close * volume, with floor to avoid division blowups.
+        return max(candle.close * max(candle.volume, 0.0), 1.0)
+
+    def fill_price(self, candle: Candle, side: str, notional: float) -> float:
+        q = self.quote(candle)
+        half_spread = bps_to_frac(q.spread_bps) / 2.0
+        spread_mult = (1.0 + half_spread) if side == "buy" else (1.0 - half_spread)
+        # slippage: scaled by sqrt(notional/liquidity)
+        liq = self._liquidity_proxy(candle)
+        impact = math.sqrt(max(notional / liq, 0.0))
+        impact = clamp(impact, 0.0, 0.25)
+        slip = bps_to_frac(self.risk.slippage_bps) * (0.4 + 0.8 * impact)
+        slip_mult = (1.0 + slip) if side == "buy" else (1.0 - slip)
+        px = q.price * spread_mult * slip_mult
+        # tiny jitter to avoid pathologies; deterministic via seed
+        jitter = 1.0 + (self.rng.random() - 0.5) * 0.00015
+        return px * jitter
+
+    def fee(self, notional: float) -> float:
+        return abs(notional) * bps_to_frac(self.risk.fee_bps)
+
+
+class RiskManager:
+    def __init__(self, risk: RiskLimits):
+        self.risk = risk
+        self.day_start_ts: int | None = None
+        self.day_start_equity: float | None = None
+        self.day_min_equity: float | None = None
+
+    def reset_day(self, ts: int, equity: float) -> None:
+        self.day_start_ts = ts
+        self.day_start_equity = equity
+        self.day_min_equity = equity
