@@ -184,3 +184,65 @@ class Position:
         signed_qty = fill.qty if fill.side == "buy" else -fill.qty
         new_qty = self.qty + signed_qty
         if abs(new_qty) < 1e-12:
+            # closing out
+            pnl = 0.0
+            if self.qty > 0 and fill.side == "sell":
+                pnl = (fill.price - self.avg_price) * fill.qty
+            elif self.qty < 0 and fill.side == "buy":
+                pnl = (self.avg_price - fill.price) * fill.qty
+            self.realized_pnl += pnl - fill.fee
+            self.qty = 0.0
+            self.avg_price = 0.0
+            return
+
+        # increasing or flipping
+        if self.qty == 0.0 or (self.qty > 0 and signed_qty > 0) or (self.qty < 0 and signed_qty < 0):
+            # same direction: update VWAP average
+            total_cost = self.avg_price * abs(self.qty) + fill.price * abs(signed_qty)
+            total_qty = abs(self.qty) + abs(signed_qty)
+            self.avg_price = total_cost / max(total_qty, 1e-12)
+            self.qty = new_qty
+            self.realized_pnl -= fill.fee
+            return
+
+        # reducing or flipping direction: realize PnL on closed portion
+        closed = min(abs(self.qty), abs(signed_qty))
+        pnl = 0.0
+        if self.qty > 0 and fill.side == "sell":
+            pnl = (fill.price - self.avg_price) * closed
+        elif self.qty < 0 and fill.side == "buy":
+            pnl = (self.avg_price - fill.price) * closed
+        self.realized_pnl += pnl - fill.fee
+        self.qty = new_qty
+        if (self.qty > 0 and self.avg_price == 0.0) or (self.qty < 0 and self.avg_price == 0.0):
+            self.avg_price = fill.price
+
+
+@dataclasses.dataclass
+class Portfolio:
+    cash: float
+    positions: dict[str, Position] = dataclasses.field(default_factory=dict)
+    equity_curve: list[tuple[int, float]] = dataclasses.field(default_factory=list)
+    fees_paid: float = 0.0
+
+    def get_pos(self, symbol: str) -> Position:
+        p = self.positions.get(symbol)
+        if p is None:
+            p = Position(symbol=symbol)
+            self.positions[symbol] = p
+        return p
+
+    def apply_fill(self, fill: Fill) -> None:
+        p = self.get_pos(fill.symbol)
+        p.apply_fill(fill)
+        notional = fill.qty * fill.price
+        if fill.side == "buy":
+            self.cash -= notional + fill.fee
+        else:
+            self.cash += notional - fill.fee
+        self.fees_paid += fill.fee
+
+    def mark_to_market(self, ts: int, prices: dict[str, float]) -> float:
+        eq = self.cash
+        for sym, pos in self.positions.items():
+            px = prices.get(sym)
