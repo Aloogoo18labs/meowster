@@ -370,3 +370,65 @@ class RiskLimits:
 class StrategyConfig:
     name: str
     mode: str  # "momentum" | "mean_revert" | "blend"
+    ema_fast: int
+    ema_slow: int
+    rsi_window: int
+    rsi_buy_below: float
+    rsi_sell_above: float
+    z_window: int
+    z_enter: float
+    z_exit: float
+    target_pos_notional: float
+    rebalance_bps: float
+
+    def as_json(self) -> JSON:
+        return dataclasses.asdict(self)
+
+
+@dataclasses.dataclass(frozen=True)
+class AppConfig:
+    appname: str
+    instance_id: str
+    listen_host: str
+    listen_port: int
+    db_path: str
+    data_path: str
+    symbol: str
+    base_ccy: str
+    quote_ccy: str
+    seed: int
+    risk: RiskLimits
+    strat: StrategyConfig
+
+    def as_json(self) -> JSON:
+        d = dataclasses.asdict(self)
+        d["risk"] = self.risk.as_json()
+        d["strat"] = self.strat.as_json()
+        return d
+
+
+def default_config() -> AppConfig:
+    seed = 143_091_731
+    rid = uuid.uuid4().hex
+    risk = RiskLimits(
+        max_pos_notional=1_250.0,
+        max_order_notional=420.0,
+        max_daily_loss=145.0,
+        max_leverage_soft=1.8,
+        slippage_bps=45.0,
+        fee_bps=9.0,
+        spread_bps=12.0,
+    )
+    strat = StrategyConfig(
+        name="jlp_motivater_blend",
+        mode="blend",
+        ema_fast=14,
+        ema_slow=55,
+        rsi_window=14,
+        rsi_buy_below=36.5,
+        rsi_sell_above=66.5,
+        z_window=36,
+        z_enter=1.15,
+        z_exit=0.35,
+        target_pos_notional=600.0,
+        rebalance_bps=95.0,
