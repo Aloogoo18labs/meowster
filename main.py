@@ -928,3 +928,65 @@ class OrderManager:
         fee = self.execsim.fee(notional)
         px = self.execsim.fill_price(candle, order.side, abs(notional))
         fill = Fill(
+            order_id=order.order_id,
+            symbol=order.symbol,
+            side=order.side,
+            qty=order.qty,
+            price=px,
+            fee=fee,
+            ts=candle.ts,
+            liquidity="taker",
+        )
+        self.store.insert_fill(fill)
+        self.store.update_order_fill(order.order_id, filled_qty=order.qty, avg_price=px, status="filled")
+        return fill
+
+
+@dataclasses.dataclass
+class BacktestResult:
+    run_id: str
+    started_at: str
+    ended_at: str
+    candles: int
+    fills: int
+    start_cash: float
+    end_cash: float
+    end_equity: float
+    fees_paid: float
+    realized_pnl: float
+    max_drawdown: float
+    sharpe_like: float
+    notes: str
+
+    def as_json(self) -> JSON:
+        return dataclasses.asdict(self)
+
+
+def compute_drawdown(equity: list[tuple[int, float]]) -> float:
+    peak = -1e99
+    dd = 0.0
+    for _, v in equity:
+        peak = max(peak, v)
+        dd = min(dd, v - peak)
+    return dd
+
+
+def sharpe_like(equity: list[tuple[int, float]]) -> float:
+    if len(equity) < 5:
+        return 0.0
+    rets = []
+    for i in range(1, len(equity)):
+        prev = equity[i - 1][1]
+        cur = equity[i][1]
+        if prev <= 0:
+            continue
+        rets.append((cur - prev) / prev)
+    if len(rets) < 10:
+        return 0.0
+    mu = statistics.fmean(rets)
+    sd = statistics.pstdev(rets) or 1e-12
+    return mu / sd * math.sqrt(365.0)
+
+
+class Backtester:
+    def __init__(self, cfg: AppConfig, store: SqliteStore, *, log: logging.Logger):
