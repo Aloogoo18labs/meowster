@@ -618,3 +618,65 @@ class SqliteStore:
     def list_fills(self, *, limit: int = 500) -> list[JSON]:
         with self._lock:
             cur = self._conn.execute(
+                "SELECT order_id, symbol, side, qty, price, fee, ts, liquidity FROM fills ORDER BY ts DESC LIMIT ?",
+                (int(limit),),
+            )
+            rows = cur.fetchall()
+        return [
+            {
+                "order_id": r["order_id"],
+                "symbol": r["symbol"],
+                "side": r["side"],
+                "qty": float(r["qty"]),
+                "price": float(r["price"]),
+                "fee": float(r["fee"]),
+                "ts": int(r["ts"]),
+                "liquidity": r["liquidity"],
+            }
+            for r in rows
+        ]
+
+
+class CsvMarketData:
+    """
+    Reads OHLCV candles from a CSV file.
+
+    Format:
+      ts,open,high,low,close,volume
+    where ts is unix seconds (UTC).
+    """
+
+    def __init__(self, path: str):
+        self.path = path
+
+    def load(self) -> list[Candle]:
+        if not os.path.exists(self.path):
+            raise MarketDataError(f"missing CSV: {self.path}")
+        buf = []
+        with open(self.path, "r", encoding="utf-8") as f:
+            for line_no, line in enumerate(f, start=1):
+                line = line.strip()
+                if not line:
+                    continue
+                if line_no == 1 and ("ts" in line.lower() and "open" in line.lower()):
+                    continue
+                parts = [p.strip() for p in line.split(",")]
+                if len(parts) < 6:
+                    raise MarketDataError(f"bad CSV line {line_no}: {line}")
+                ts = int(float(parts[0]))
+                o = float(parts[1])
+                h = float(parts[2])
+                l = float(parts[3])
+                c = float(parts[4])
+                v = float(parts[5])
+                buf.append(Candle(ts, o, h, l, c, v))
+        buf.sort(key=lambda x: x.ts)
+        return buf
+
+
+@dataclasses.dataclass(frozen=True)
+class Signal:
+    ts: int
+    action: str  # "hold" | "buy" | "sell"
+    strength: float  # 0..1
+    reason: str
