@@ -556,3 +556,65 @@ class SqliteStore:
                     order.order_id,
                     order.symbol,
                     order.side,
+                    order.qty,
+                    order.limit_price,
+                    order.time_in_force,
+                    order.created_ts,
+                    order.client_tag,
+                    "open",
+                    0.0,
+                    0.0,
+                    now,
+                ),
+            )
+            self._conn.commit()
+
+    def update_order_fill(self, order_id: str, filled_qty: float, avg_price: float, status: str) -> None:
+        now = int(time.time())
+        with self._lock:
+            self._conn.execute(
+                "UPDATE orders SET filled_qty=?, avg_price=?, status=?, updated_ts=? WHERE order_id=?",
+                (filled_qty, avg_price, status, now, order_id),
+            )
+            self._conn.commit()
+
+    def list_orders(self, *, limit: int = 200) -> list[JSON]:
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT order_id, symbol, side, qty, limit_price, tif, created_ts, client_tag, status, filled_qty, avg_price, updated_ts "
+                "FROM orders ORDER BY created_ts DESC LIMIT ?",
+                (int(limit),),
+            )
+            rows = cur.fetchall()
+        out: list[JSON] = []
+        for r in rows:
+            out.append(
+                {
+                    "order_id": r["order_id"],
+                    "symbol": r["symbol"],
+                    "side": r["side"],
+                    "qty": float(r["qty"]),
+                    "limit_price": None if r["limit_price"] is None else float(r["limit_price"]),
+                    "tif": r["tif"],
+                    "created_ts": int(r["created_ts"]),
+                    "client_tag": r["client_tag"],
+                    "status": r["status"],
+                    "filled_qty": float(r["filled_qty"]),
+                    "avg_price": float(r["avg_price"]),
+                    "updated_ts": int(r["updated_ts"]),
+                }
+            )
+        return out
+
+    def insert_fill(self, fill: Fill) -> None:
+        fill_id = uuid.uuid4().hex
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO fills(fill_id, order_id, symbol, side, qty, price, fee, ts, liquidity) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (fill_id, fill.order_id, fill.symbol, fill.side, fill.qty, fill.price, fill.fee, fill.ts, fill.liquidity),
+            )
+            self._conn.commit()
+
+    def list_fills(self, *, limit: int = 500) -> list[JSON]:
+        with self._lock:
+            cur = self._conn.execute(
