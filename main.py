@@ -804,3 +804,65 @@ class RiskManager:
         self.day_start_ts = ts
         self.day_start_equity = equity
         self.day_min_equity = equity
+
+    def update_equity(self, equity: float) -> None:
+        if self.day_min_equity is None:
+            self.day_min_equity = equity
+        else:
+            self.day_min_equity = min(self.day_min_equity, equity)
+
+    def check_daily_loss(self) -> tuple[bool, str]:
+        if self.day_start_equity is None or self.day_min_equity is None:
+            return True, "warmup"
+        loss = self.day_start_equity - self.day_min_equity
+        if loss > self.risk.max_daily_loss:
+            return False, f"max_daily_loss_exceeded loss={money(loss)} limit={money(self.risk.max_daily_loss)}"
+        return True, "ok"
+
+    def check_order(self, notional: float) -> tuple[bool, str]:
+        if abs(notional) > self.risk.max_order_notional:
+            return False, f"max_order_notional {money(abs(notional))}>{money(self.risk.max_order_notional)}"
+        return True, "ok"
+
+    def check_position(self, pos_notional: float) -> tuple[bool, str]:
+        if abs(pos_notional) > self.risk.max_pos_notional:
+            return False, f"max_pos_notional {money(abs(pos_notional))}>{money(self.risk.max_pos_notional)}"
+        return True, "ok"
+
+
+@dataclasses.dataclass(frozen=True)
+class Decision:
+    ts: int
+    action: str
+    qty: float
+    notional: float
+    reason: str
+    strength: float
+
+    def as_json(self) -> JSON:
+        return dataclasses.asdict(self)
+
+
+class TradePlanner:
+    def __init__(self, cfg: StrategyConfig, risk: RiskManager):
+        self.cfg = cfg
+        self.risk = risk
+
+    def plan(self, candle: Candle, signal: Signal, portfolio: Portfolio, symbol: str) -> Decision:
+        price = candle.close
+        pos = portfolio.get_pos(symbol)
+        pos_notional = pos.qty * price
+
+        # rebalance logic: aim for +/- target_pos_notional depending on signal
+        target = 0.0
+        if signal.action == "buy":
+            target = self.cfg.target_pos_notional * clamp(0.4 + 0.6 * signal.strength, 0.0, 1.0)
+        elif signal.action == "sell":
+            target = -self.cfg.target_pos_notional * clamp(0.4 + 0.6 * signal.strength, 0.0, 1.0)
+        else:
+            # drift toward flat if out of band
+            if abs(pos_notional) > self.cfg.target_pos_notional * 0.85:
+                target = math.copysign(self.cfg.target_pos_notional * 0.35, pos_notional)
+            else:
+                target = pos_notional
+
