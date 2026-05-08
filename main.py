@@ -990,3 +990,65 @@ def sharpe_like(equity: list[tuple[int, float]]) -> float:
 
 class Backtester:
     def __init__(self, cfg: AppConfig, store: SqliteStore, *, log: logging.Logger):
+        self.cfg = cfg
+        self.store = store
+        self.log = log
+        self.rng = random.Random(cfg.seed)
+        self.execsim = ExecutionSim(cfg.risk, seed=cfg.seed ^ 0x5A17C3)
+        self.riskm = RiskManager(cfg.risk)
+        self.strategy = BlendStrategy(cfg.strat)
+        self.planner = TradePlanner(cfg.strat, self.riskm)
+        self.orderm = OrderManager(store, self.execsim, self.riskm, symbol=cfg.symbol)
+
+    def run(self, candles: list[Candle], *, start_cash: float) -> tuple[BacktestResult, Portfolio, list[Decision]]:
+        run_id = uuid.uuid4().hex
+        portfolio = Portfolio(cash=float(start_cash))
+        signals = self.strategy.generate(candles)
+        decisions: list[Decision] = []
+        fills = 0
+
+        if candles:
+            self.riskm.reset_day(candles[0].ts, start_cash)
+
+        for i, c in enumerate(candles):
+            # reset daily counters at UTC day boundary
+            if i > 0:
+                prev = _dt.datetime.fromtimestamp(candles[i - 1].ts, tz=_dt.timezone.utc).date()
+                cur = _dt.datetime.fromtimestamp(c.ts, tz=_dt.timezone.utc).date()
+                if cur != prev:
+                    eq_prev = portfolio.equity_curve[-1][1] if portfolio.equity_curve else start_cash
+                    self.riskm.reset_day(c.ts, eq_prev)
+
+            px = c.close
+            equity = portfolio.mark_to_market(c.ts, {self.cfg.symbol: px})
+            self.riskm.update_equity(equity)
+            ok_loss, why_loss = self.riskm.check_daily_loss()
+            if not ok_loss:
+                decisions.append(Decision(ts=c.ts, action="hold", qty=0.0, notional=0.0, reason=f"risk:{why_loss}", strength=0.0))
+                continue
+
+            s = signals[i]
+            d = self.planner.plan(c, s, portfolio, self.cfg.symbol)
+            decisions.append(d)
+            if d.action == "hold" or d.qty <= 0:
+                continue
+
+            order = self.orderm.submit_market(c.ts, d.action, d.qty, client_tag=f"bt:{run_id[:10]}:{d.reason}")
+            fill = self.orderm.try_fill(order, c)
+            portfolio.apply_fill(fill)
+            fills += 1
+
+        end_equity = portfolio.equity_curve[-1][1] if portfolio.equity_curve else start_cash
+        dd = compute_drawdown(portfolio.equity_curve)
+        sh = sharpe_like(portfolio.equity_curve)
+        realized = sum(p.realized_pnl for p in portfolio.positions.values())
+        started_at = iso(_dt.datetime.fromtimestamp(candles[0].ts, tz=_dt.timezone.utc)) if candles else iso()
+        ended_at = iso(_dt.datetime.fromtimestamp(candles[-1].ts, tz=_dt.timezone.utc)) if candles else iso()
+
+        res = BacktestResult(
+            run_id=run_id,
+            started_at=started_at,
+            ended_at=ended_at,
+            candles=len(candles),
+            fills=fills,
+            start_cash=float(start_cash),
