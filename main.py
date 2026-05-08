@@ -1362,3 +1362,65 @@ class MeowsterServer(http.server.ThreadingHTTPServer):
                 continue
             try:
                 typ = job.get("t")
+                if typ == "reload":
+                    self._job_reload()
+                elif typ == "backtest":
+                    self._job_backtest(float(job.get("start_cash") or 1000.0))
+                else:
+                    self.state.set_error(f"unknown job type: {typ}")
+            except Exception:
+                self.state.set_error("worker crashed: " + traceback.format_exc(limit=5))
+            finally:
+                with contextlib.suppress(Exception):
+                    self._jobs.task_done()
+
+    def _job_reload(self) -> None:
+        self.state.set_status("loading", f"reading {self.state.cfg.data_path}")
+        md = CsvMarketData(self.state.cfg.data_path)
+        candles = md.load()
+        self.store.upsert_candles(candles)
+        self.state.candles = candles
+        self.state.set_status("ready", f"candles={len(candles)}")
+        self.log.info("loaded %d candles", len(candles))
+
+    def _job_backtest(self, start_cash: float) -> None:
+        if not self.state.candles:
+            self._job_reload()
+        self.state.set_status("backtesting", f"cash={start_cash}")
+        bt = Backtester(self.state.cfg, self.store, log=self.log)
+        res, portfolio, decisions = bt.run(self.state.candles, start_cash=start_cash)
+        self.state.last_backtest = res
+        self.state.last_portfolio = portfolio
+        self.state.last_decisions = decisions
+        self.state.set_status("ready", f"backtest={res.run_id[:10]} fills={res.fills} end_eq={money(res.end_equity)}")
+        self.state.bus.publish({"t": "backtest", "result": res.as_json(), "at": iso()})
+
+
+def build_logger(verbose: bool) -> logging.Logger:
+    log = logging.getLogger("meowster")
+    log.setLevel(logging.DEBUG if verbose else logging.INFO)
+    h = logging.StreamHandler()
+    fmt = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
+    h.setFormatter(fmt)
+    log.handlers[:] = [h]
+    return log
+
+
+def load_or_init_config(path: str | None) -> AppConfig:
+    cfg = default_config()
+    if path is None:
+        return cfg
+    if not os.path.exists(path):
+        # write defaults
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(cfg.as_json(), f, ensure_ascii=False, indent=2, sort_keys=True)
+        return cfg
+    with open(path, "r", encoding="utf-8") as f:
+        obj = json.load(f)
+    if not isinstance(obj, dict):
+        raise ConfigError("config must be JSON object")
+    # shallow parse with defaults; keep stable field names for UI
+    risk_o = obj.get("risk") or {}
+    strat_o = obj.get("strat") or {}
+    risk = RiskLimits(
+        max_pos_notional=float(risk_o.get("max_pos_notional", cfg.risk.max_pos_notional)),
