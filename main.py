@@ -308,3 +308,65 @@ class Indicators:
         out[window] = 100.0 - (100.0 / (1.0 + rs))
         for i in range(window + 1, len(closes)):
             g = gains[i - 1]
+            l = losses[i - 1]
+            avg_gain = (avg_gain * (window - 1) + g) / window
+            avg_loss = (avg_loss * (window - 1) + l) / window
+            rs = avg_gain / max(avg_loss, 1e-12)
+            out[i] = 100.0 - (100.0 / (1.0 + rs))
+        return out
+
+    @staticmethod
+    def atr(candles: list[Candle], window: int = 14) -> list[float | None]:
+        if window <= 1:
+            raise ValueError("window")
+        out: list[float | None] = [None] * len(candles)
+        trs: list[float] = []
+        for i, c in enumerate(candles):
+            if i == 0:
+                tr = c.high - c.low
+            else:
+                prev = candles[i - 1].close
+                tr = max(c.high - c.low, abs(c.high - prev), abs(c.low - prev))
+            trs.append(tr)
+        if len(trs) < window:
+            return out
+        avg = sum(trs[:window]) / window
+        out[window - 1] = avg
+        for i in range(window, len(trs)):
+            avg = (avg * (window - 1) + trs[i]) / window
+            out[i] = avg
+        return out
+
+    @staticmethod
+    def zscore(values: list[float], window: int) -> list[float | None]:
+        if window <= 1:
+            raise ValueError("window")
+        out: list[float | None] = [None] * len(values)
+        for i in range(len(values)):
+            if i + 1 < window:
+                continue
+            slice_ = values[i + 1 - window : i + 1]
+            mu = statistics.fmean(slice_)
+            sd = statistics.pstdev(slice_) or 1e-12
+            out[i] = (values[i] - mu) / sd
+        return out
+
+
+@dataclasses.dataclass(frozen=True)
+class RiskLimits:
+    max_pos_notional: float
+    max_order_notional: float
+    max_daily_loss: float
+    max_leverage_soft: float
+    slippage_bps: float
+    fee_bps: float
+    spread_bps: float
+
+    def as_json(self) -> JSON:
+        return dataclasses.asdict(self)
+
+
+@dataclasses.dataclass(frozen=True)
+class StrategyConfig:
+    name: str
+    mode: str  # "momentum" | "mean_revert" | "blend"
