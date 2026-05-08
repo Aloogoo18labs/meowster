@@ -1176,3 +1176,65 @@ class TokenAuth:
         self.secret = secret.encode("utf-8")
 
     def mint(self, subject: str, *, ttl_s: int = 3600) -> str:
+        exp = int(time.time()) + int(ttl_s)
+        nonce = uuid.uuid4().hex[:12]
+        msg = f"{subject}|{exp}|{nonce}".encode("utf-8")
+        sig = hmac.new(self.secret, msg, hashlib.sha256).digest()
+        tok = base64.urlsafe_b64encode(msg + b"." + sig).decode("ascii").rstrip("=")
+        return tok
+
+    def verify(self, token: str) -> tuple[bool, str]:
+        try:
+            pad = "=" * (-len(token) % 4)
+            raw = base64.urlsafe_b64decode((token + pad).encode("ascii"))
+            msg, sig = raw.rsplit(b".", 1)
+            expect = hmac.new(self.secret, msg, hashlib.sha256).digest()
+            if not hmac.compare_digest(sig, expect):
+                return False, "bad_sig"
+            parts = msg.decode("utf-8").split("|")
+            if len(parts) != 3:
+                return False, "bad_fmt"
+            exp = int(parts[1])
+            if time.time() > exp:
+                return False, "expired"
+            return True, parts[0]
+        except Exception:
+            return False, "error"
+
+
+class ApiHandler(http.server.BaseHTTPRequestHandler):
+    server_version = "meowster/1.0"
+
+    def log_message(self, fmt: str, *args: t.Any) -> None:
+        self.server.log.info("%s - %s", self.address_string(), fmt % args)
+
+    @property
+    def server(self) -> "MeowsterServer":  # type: ignore[override]
+        return t.cast("MeowsterServer", super().server)
+
+    def do_OPTIONS(self) -> None:  # noqa: N802
+        self.send_response(204)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Meowster-Token")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.end_headers()
+
+    def _require_token(self) -> tuple[bool, str]:
+        if not self.server.require_token:
+            return True, "disabled"
+        tok = self.headers.get("X-Meowster-Token", "").strip()
+        if not tok:
+            return False, "missing"
+        ok, sub = self.server.auth.verify(tok)
+        return ok, sub
+
+    def do_GET(self) -> None:  # noqa: N802
+        path, q = parse_query(self.path)
+        try:
+            if path == "/":
+                text_response(self, 200, "meowster is running\n")
+                return
+            if path == "/api/ping":
+                json_response(self, 200, {"ok": True, "ts": int(time.time()), "iso": iso()})
+                return
+            if path == "/api/config":
