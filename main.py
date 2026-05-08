@@ -1238,3 +1238,65 @@ class ApiHandler(http.server.BaseHTTPRequestHandler):
                 json_response(self, 200, {"ok": True, "ts": int(time.time()), "iso": iso()})
                 return
             if path == "/api/config":
+                json_response(self, 200, {"ok": True, "config": self.server.state.cfg.as_json()})
+                return
+            if path == "/api/state":
+                json_response(self, 200, {"ok": True, "state": self.server.state.snapshot()})
+                return
+            if path == "/api/events":
+                ev = self.server.state.bus.drain(limit=parse_int(q.get("limit", ""), default=250) or 250)
+                json_response(self, 200, {"ok": True, "events": ev})
+                return
+            if path == "/api/orders":
+                ok, _ = self._require_token()
+                if not ok:
+                    json_response(self, 401, {"ok": False, "error": "unauthorized"})
+                    return
+                lim = parse_int(q.get("limit", ""), default=200) or 200
+                json_response(self, 200, {"ok": True, "orders": self.server.store.list_orders(limit=lim)})
+                return
+            if path == "/api/fills":
+                ok, _ = self._require_token()
+                if not ok:
+                    json_response(self, 401, {"ok": False, "error": "unauthorized"})
+                    return
+                lim = parse_int(q.get("limit", ""), default=500) or 500
+                json_response(self, 200, {"ok": True, "fills": self.server.store.list_fills(limit=lim)})
+                return
+            if path == "/api/equity":
+                ok, _ = self._require_token()
+                if not ok:
+                    json_response(self, 401, {"ok": False, "error": "unauthorized"})
+                    return
+                snap = self.server.state.last_portfolio
+                if snap is None:
+                    json_response(self, 200, {"ok": True, "equity": []})
+                    return
+                eq = [{"ts": ts, "equity": v} for ts, v in snap.equity_curve[-2000:]]
+                json_response(self, 200, {"ok": True, "equity": eq})
+                return
+            if path == "/api/decisions":
+                ok, _ = self._require_token()
+                if not ok:
+                    json_response(self, 401, {"ok": False, "error": "unauthorized"})
+                    return
+                d = [x.as_json() for x in self.server.state.last_decisions[-1000:]]
+                json_response(self, 200, {"ok": True, "decisions": d})
+                return
+            json_response(self, 404, {"ok": False, "error": "not_found", "path": path})
+        except Exception as e:
+            self.server.state.set_error(f"GET {path} failed: {e}")
+            json_response(self, 500, {"ok": False, "error": "server_error"})
+
+    def do_POST(self) -> None:  # noqa: N802
+        path, q = parse_query(self.path)
+        try:
+            if path == "/api/auth/mint":
+                # Optional token auth mint endpoint; if token auth disabled, still returns a token for UI parity.
+                length = int(self.headers.get("Content-Length", "0") or "0")
+                body = read_json_body(self.rfile, length)
+                subject = str(body.get("subject") or "kasha")
+                ttl = int(body.get("ttl_s") or 3600)
+                tok = self.server.auth.mint(subject, ttl_s=ttl)
+                json_response(self, 200, {"ok": True, "token": tok, "subject": subject, "ttl_s": ttl})
+                return
