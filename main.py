@@ -1486,3 +1486,65 @@ def ensure_sample_csv(path: str, *, seed: int) -> None:
 
 def run_server(cfg: AppConfig, *, verbose: bool, require_token: bool) -> int:
     log = build_logger(verbose)
+    ensure_sample_csv(cfg.data_path, seed=cfg.seed)
+    store = SqliteStore(cfg.db_path)
+    state = BotState(cfg, store, log=log)
+    state.set_status("booting", "starting server")
+    srv = MeowsterServer(cfg.listen_host, cfg.listen_port, state, store, log=log, require_token=require_token)
+    srv.start_worker()
+
+    # warm-load and run a first backtest to populate UI quickly
+    srv.enqueue_job({"t": "reload"})
+    srv.enqueue_job({"t": "backtest", "start_cash": 1000.0})
+
+    stop = threading.Event()
+
+    def _sigint(_sig: int, _frm: t.Any) -> None:
+        stop.set()
+        srv.stop()
+
+    with contextlib.suppress(Exception):
+        signal.signal(signal.SIGINT, _sigint)
+        signal.signal(signal.SIGTERM, _sigint)
+
+    log.info("meowster listening on http://%s:%d", cfg.listen_host, cfg.listen_port)
+    log.info("data CSV: %s", cfg.data_path)
+    log.info("db: %s", cfg.db_path)
+    try:
+        srv.serve_forever(poll_interval=0.25)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        stop.set()
+        state.set_status("stopped", "shutdown")
+        store.close()
+    return 0
+
+
+def cmd_backtest(cfg: AppConfig, *, verbose: bool, start_cash: float) -> int:
+    log = build_logger(verbose)
+    ensure_sample_csv(cfg.data_path, seed=cfg.seed)
+    store = SqliteStore(cfg.db_path)
+    try:
+        md = CsvMarketData(cfg.data_path)
+        candles = md.load()
+        store.upsert_candles(candles)
+        bt = Backtester(cfg, store, log=log)
+        res, portfolio, decisions = bt.run(candles, start_cash=start_cash)
+        out = {
+            "result": res.as_json(),
+            "positions": {sym: dataclasses.asdict(pos) for sym, pos in portfolio.positions.items()},
+            "last_decisions": [d.as_json() for d in decisions[-25:]],
+        }
+        print(json.dumps(out, ensure_ascii=False, indent=2, sort_keys=True))
+        return 0
+    finally:
+        store.close()
+
+
+def cmd_make_config(path: str) -> int:
+    cfg = default_config()
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(cfg.as_json(), f, ensure_ascii=False, indent=2, sort_keys=True)
+    print(f"wrote {path}")
+    return 0
