@@ -246,3 +246,65 @@ class Portfolio:
         eq = self.cash
         for sym, pos in self.positions.items():
             px = prices.get(sym)
+            if px is None:
+                continue
+            eq += pos.qty * px
+        self.equity_curve.append((ts, eq))
+        return eq
+
+
+class Indicators:
+    @staticmethod
+    def sma(values: list[float], window: int) -> list[float | None]:
+        if window <= 0:
+            raise ValueError("window")
+        out: list[float | None] = [None] * len(values)
+        s = 0.0
+        q: queue.SimpleQueue[float] = queue.SimpleQueue()
+        count = 0
+        for i, v in enumerate(values):
+            s += v
+            q.put(v)
+            count += 1
+            if count > window:
+                s -= q.get()
+                count -= 1
+            if count == window:
+                out[i] = s / window
+        return out
+
+    @staticmethod
+    def ema(values: list[float], window: int) -> list[float | None]:
+        if window <= 0:
+            raise ValueError("window")
+        out: list[float | None] = [None] * len(values)
+        k = 2.0 / (window + 1.0)
+        ema: float | None = None
+        for i, v in enumerate(values):
+            if ema is None:
+                ema = v
+            else:
+                ema = (v - ema) * k + ema
+            if i + 1 >= window:
+                out[i] = ema
+        return out
+
+    @staticmethod
+    def rsi(closes: list[float], window: int = 14) -> list[float | None]:
+        if window <= 1:
+            raise ValueError("window")
+        out: list[float | None] = [None] * len(closes)
+        gains: list[float] = []
+        losses: list[float] = []
+        for i in range(1, len(closes)):
+            d = closes[i] - closes[i - 1]
+            gains.append(max(d, 0.0))
+            losses.append(max(-d, 0.0))
+        if len(gains) < window:
+            return out
+        avg_gain = sum(gains[:window]) / window
+        avg_loss = sum(losses[:window]) / window
+        rs = avg_gain / max(avg_loss, 1e-12)
+        out[window] = 100.0 - (100.0 / (1.0 + rs))
+        for i in range(window + 1, len(closes)):
+            g = gains[i - 1]
