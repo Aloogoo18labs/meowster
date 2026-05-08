@@ -866,3 +866,65 @@ class TradePlanner:
             else:
                 target = pos_notional
 
+        delta = target - pos_notional
+        band = abs(target) * bps_to_frac(self.cfg.rebalance_bps) + (10.0 if abs(target) < 50 else 0.0)
+        if abs(delta) <= band:
+            return Decision(ts=candle.ts, action="hold", qty=0.0, notional=0.0, reason=f"{signal.reason}:in_band", strength=signal.strength)
+
+        notional = delta
+        ok, why = self.risk.check_order(notional)
+        if not ok:
+            # clip toward limit
+            cap = self.risk.risk.max_order_notional
+            notional = math.copysign(cap, notional)
+            ok2, _ = self.risk.check_order(notional)
+            if not ok2:
+                return Decision(ts=candle.ts, action="hold", qty=0.0, notional=0.0, reason=f"risk_block:{why}", strength=signal.strength)
+
+        # ensure we do not exceed max position after fill (approx)
+        next_pos_notional = pos_notional + notional
+        okp, whyp = self.risk.check_position(next_pos_notional)
+        if not okp:
+            # reduce to fit
+            cap = self.risk.risk.max_pos_notional
+            notional = clamp(next_pos_notional, -cap, cap) - pos_notional
+            if abs(notional) < 1.0:
+                return Decision(ts=candle.ts, action="hold", qty=0.0, notional=0.0, reason=f"risk_pos_block:{whyp}", strength=signal.strength)
+
+        qty = notional / max(price, 1e-12)
+        if qty > 0:
+            act = "buy"
+        elif qty < 0:
+            act = "sell"
+        else:
+            act = "hold"
+        return Decision(ts=candle.ts, action=act, qty=abs(qty), notional=notional, reason=f"{signal.reason}:rebalance", strength=signal.strength)
+
+
+class OrderManager:
+    def __init__(self, store: SqliteStore, execsim: ExecutionSim, risk: RiskManager, *, symbol: str):
+        self.store = store
+        self.execsim = execsim
+        self.risk = risk
+        self.symbol = symbol
+
+    def submit_market(self, ts: int, side: str, qty: float, *, client_tag: str) -> Order:
+        oid = uuid.uuid4().hex
+        order = Order(
+            order_id=oid,
+            symbol=self.symbol,
+            side=side,
+            qty=float(qty),
+            limit_price=None,
+            time_in_force="IOC",
+            created_ts=int(ts),
+            client_tag=client_tag,
+        )
+        self.store.insert_order(order)
+        return order
+
+    def try_fill(self, order: Order, candle: Candle) -> Fill:
+        notional = order.qty * candle.close
+        fee = self.execsim.fee(notional)
+        px = self.execsim.fill_price(candle, order.side, abs(notional))
+        fill = Fill(
