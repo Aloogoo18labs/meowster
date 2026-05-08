@@ -1424,3 +1424,65 @@ def load_or_init_config(path: str | None) -> AppConfig:
     strat_o = obj.get("strat") or {}
     risk = RiskLimits(
         max_pos_notional=float(risk_o.get("max_pos_notional", cfg.risk.max_pos_notional)),
+        max_order_notional=float(risk_o.get("max_order_notional", cfg.risk.max_order_notional)),
+        max_daily_loss=float(risk_o.get("max_daily_loss", cfg.risk.max_daily_loss)),
+        max_leverage_soft=float(risk_o.get("max_leverage_soft", cfg.risk.max_leverage_soft)),
+        slippage_bps=float(risk_o.get("slippage_bps", cfg.risk.slippage_bps)),
+        fee_bps=float(risk_o.get("fee_bps", cfg.risk.fee_bps)),
+        spread_bps=float(risk_o.get("spread_bps", cfg.risk.spread_bps)),
+    )
+    strat = StrategyConfig(
+        name=str(strat_o.get("name", cfg.strat.name)),
+        mode=str(strat_o.get("mode", cfg.strat.mode)),
+        ema_fast=int(strat_o.get("ema_fast", cfg.strat.ema_fast)),
+        ema_slow=int(strat_o.get("ema_slow", cfg.strat.ema_slow)),
+        rsi_window=int(strat_o.get("rsi_window", cfg.strat.rsi_window)),
+        rsi_buy_below=float(strat_o.get("rsi_buy_below", cfg.strat.rsi_buy_below)),
+        rsi_sell_above=float(strat_o.get("rsi_sell_above", cfg.strat.rsi_sell_above)),
+        z_window=int(strat_o.get("z_window", cfg.strat.z_window)),
+        z_enter=float(strat_o.get("z_enter", cfg.strat.z_enter)),
+        z_exit=float(strat_o.get("z_exit", cfg.strat.z_exit)),
+        target_pos_notional=float(strat_o.get("target_pos_notional", cfg.strat.target_pos_notional)),
+        rebalance_bps=float(strat_o.get("rebalance_bps", cfg.strat.rebalance_bps)),
+    )
+    merged = AppConfig(
+        appname=str(obj.get("appname", cfg.appname)),
+        instance_id=str(obj.get("instance_id", cfg.instance_id)),
+        listen_host=str(obj.get("listen_host", cfg.listen_host)),
+        listen_port=int(obj.get("listen_port", cfg.listen_port)),
+        db_path=str(obj.get("db_path", cfg.db_path)),
+        data_path=str(obj.get("data_path", cfg.data_path)),
+        symbol=str(obj.get("symbol", cfg.symbol)),
+        base_ccy=str(obj.get("base_ccy", cfg.base_ccy)),
+        quote_ccy=str(obj.get("quote_ccy", cfg.quote_ccy)),
+        seed=int(obj.get("seed", cfg.seed)),
+        risk=risk,
+        strat=strat,
+    )
+    return merged
+
+
+def ensure_sample_csv(path: str, *, seed: int) -> None:
+    if os.path.exists(path):
+        return
+    rng = random.Random(seed ^ 0xC0FFEE)
+    start = int(time.time()) - 3600 * 24 * 90
+    ts = start - (start % 3600)
+    price = 0.74 + rng.random() * 0.08
+    lines = ["ts,open,high,low,close,volume\n"]
+    for i in range(24 * 90):
+        o = price
+        drift = (rng.random() - 0.5) * 0.02
+        c = max(0.05, o * (1.0 + drift))
+        hi = max(o, c) * (1.0 + rng.random() * 0.01)
+        lo = min(o, c) * (1.0 - rng.random() * 0.01)
+        vol = 12_000 + rng.random() * 18_000
+        lines.append(f"{ts},{o:.6f},{hi:.6f},{lo:.6f},{c:.6f},{vol:.3f}\n")
+        ts += 3600
+        price = c
+    with open(path, "w", encoding="utf-8") as f:
+        f.writelines(lines)
+
+
+def run_server(cfg: AppConfig, *, verbose: bool, require_token: bool) -> int:
+    log = build_logger(verbose)
