@@ -432,3 +432,65 @@ def default_config() -> AppConfig:
         z_exit=0.35,
         target_pos_notional=600.0,
         rebalance_bps=95.0,
+    )
+    return AppConfig(
+        appname="meowster",
+        instance_id=rid,
+        listen_host="127.0.0.1",
+        listen_port=8844,
+        db_path=os.path.join(os.getcwd(), "meowster.sqlite3"),
+        data_path=os.path.join(os.getcwd(), "data.csv"),
+        symbol="JLP/USDT",
+        base_ccy="JLP",
+        quote_ccy="USDT",
+        seed=seed,
+        risk=risk,
+        strat=strat,
+    )
+
+
+class SqliteStore:
+    def __init__(self, path: str):
+        self.path = path
+        self._lock = threading.Lock()
+        self._conn = sqlite3.connect(self.path, check_same_thread=False)
+        self._conn.row_factory = sqlite3.Row
+        self._init_schema()
+
+    def close(self) -> None:
+        with contextlib.suppress(Exception):
+            self._conn.close()
+
+    def _init_schema(self) -> None:
+        ddl = """
+        PRAGMA journal_mode=WAL;
+        PRAGMA synchronous=NORMAL;
+        PRAGMA temp_store=MEMORY;
+
+        CREATE TABLE IF NOT EXISTS meta (
+            k TEXT PRIMARY KEY,
+            v TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS candles (
+            ts INTEGER PRIMARY KEY,
+            open REAL NOT NULL,
+            high REAL NOT NULL,
+            low REAL NOT NULL,
+            close REAL NOT NULL,
+            volume REAL NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS fills (
+            fill_id TEXT PRIMARY KEY,
+            order_id TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            side TEXT NOT NULL,
+            qty REAL NOT NULL,
+            price REAL NOT NULL,
+            fee REAL NOT NULL,
+            ts INTEGER NOT NULL,
+            liquidity TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS orders (
