@@ -680,3 +680,65 @@ class Signal:
     action: str  # "hold" | "buy" | "sell"
     strength: float  # 0..1
     reason: str
+
+    def as_json(self) -> JSON:
+        return dataclasses.asdict(self)
+
+
+class BlendStrategy:
+    def __init__(self, cfg: StrategyConfig):
+        self.cfg = cfg
+
+    def _momentum(self, closes: list[float]) -> list[Signal | None]:
+        fast = Indicators.ema(closes, self.cfg.ema_fast)
+        slow = Indicators.ema(closes, self.cfg.ema_slow)
+        out: list[Signal | None] = [None] * len(closes)
+        for i in range(len(closes)):
+            if fast[i] is None or slow[i] is None:
+                continue
+            if fast[i] > slow[i] * 1.0015:
+                out[i] = Signal(ts=0, action="buy", strength=clamp((fast[i] / max(slow[i], 1e-12)) - 1.0, 0.0, 1.0), reason="ema_cross_up")
+            elif fast[i] < slow[i] * 0.9985:
+                out[i] = Signal(ts=0, action="sell", strength=clamp((slow[i] / max(fast[i], 1e-12)) - 1.0, 0.0, 1.0), reason="ema_cross_dn")
+            else:
+                out[i] = Signal(ts=0, action="hold", strength=0.1, reason="ema_flat")
+        return out
+
+    def _mean_revert(self, closes: list[float]) -> list[Signal | None]:
+        rsi = Indicators.rsi(closes, self.cfg.rsi_window)
+        z = Indicators.zscore(closes, self.cfg.z_window)
+        out: list[Signal | None] = [None] * len(closes)
+        for i in range(len(closes)):
+            if rsi[i] is None or z[i] is None:
+                continue
+            if rsi[i] <= self.cfg.rsi_buy_below and z[i] <= -self.cfg.z_enter:
+                strength = clamp((abs(z[i]) - self.cfg.z_enter) / max(3.0, self.cfg.z_enter), 0.0, 1.0)
+                out[i] = Signal(ts=0, action="buy", strength=strength, reason="rsi_z_oversold")
+            elif rsi[i] >= self.cfg.rsi_sell_above and z[i] >= self.cfg.z_enter:
+                strength = clamp((abs(z[i]) - self.cfg.z_enter) / max(3.0, self.cfg.z_enter), 0.0, 1.0)
+                out[i] = Signal(ts=0, action="sell", strength=strength, reason="rsi_z_overbought")
+            else:
+                # exit zones: small strength for de-risking
+                if z[i] is not None and abs(z[i]) <= self.cfg.z_exit:
+                    out[i] = Signal(ts=0, action="hold", strength=0.15, reason="z_neutral")
+                else:
+                    out[i] = Signal(ts=0, action="hold", strength=0.05, reason="mr_wait")
+        return out
+
+    def generate(self, candles: list[Candle]) -> list[Signal]:
+        if len(candles) < max(self.cfg.ema_slow, self.cfg.z_window, self.cfg.rsi_window) + 5:
+            raise StrategyError("not enough candles for indicators")
+        closes = [c.close for c in candles]
+        mom = self._momentum(closes)
+        mr = self._mean_revert(closes)
+        out: list[Signal] = []
+        for i, c in enumerate(candles):
+            a = mom[i]
+            b = mr[i]
+            if a is None or b is None:
+                out.append(Signal(ts=c.ts, action="hold", strength=0.0, reason="warmup"))
+                continue
+            if self.cfg.mode == "momentum":
+                out.append(dataclasses.replace(a, ts=c.ts))
+                continue
+            if self.cfg.mode == "mean_revert":
