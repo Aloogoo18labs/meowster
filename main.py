@@ -1052,3 +1052,65 @@ class Backtester:
             candles=len(candles),
             fills=fills,
             start_cash=float(start_cash),
+            end_cash=float(portfolio.cash),
+            end_equity=float(end_equity),
+            fees_paid=float(portfolio.fees_paid),
+            realized_pnl=float(realized),
+            max_drawdown=float(dd),
+            sharpe_like=float(sh),
+            notes="paper backtest; includes spread+slippage+fee model",
+        )
+        return res, portfolio, decisions
+
+
+class EventBus:
+    def __init__(self):
+        self._q: "queue.Queue[JSON]" = queue.Queue(maxsize=10_000)
+
+    def publish(self, event: JSON) -> None:
+        try:
+            self._q.put_nowait(event)
+        except queue.Full:
+            # drop if overloaded; UI is best-effort
+            pass
+
+    def drain(self, *, limit: int = 250) -> list[JSON]:
+        out: list[JSON] = []
+        for _ in range(limit):
+            try:
+                out.append(self._q.get_nowait())
+            except queue.Empty:
+                break
+        return out
+
+
+class BotState:
+    def __init__(self, cfg: AppConfig, store: SqliteStore, *, log: logging.Logger):
+        self.cfg = cfg
+        self.store = store
+        self.log = log
+        self.bus = EventBus()
+        self._lock = threading.Lock()
+
+        self.candles: list[Candle] = []
+        self.last_backtest: BacktestResult | None = None
+        self.last_portfolio: Portfolio | None = None
+        self.last_decisions: list[Decision] = []
+        self._status: str = "idle"
+        self._status_detail: str = ""
+        self._last_error: str | None = None
+
+    def set_status(self, status: str, detail: str = "") -> None:
+        with self._lock:
+            self._status = status
+            self._status_detail = detail
+        self.bus.publish({"t": "status", "status": status, "detail": detail, "at": iso()})
+
+    def set_error(self, msg: str) -> None:
+        with self._lock:
+            self._last_error = msg
+        self.bus.publish({"t": "error", "message": msg, "at": iso()})
+
+    def snapshot(self) -> JSON:
+        with self._lock:
+            return {
