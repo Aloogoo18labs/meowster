@@ -1548,3 +1548,48 @@ def cmd_make_config(path: str) -> int:
         json.dump(cfg.as_json(), f, ensure_ascii=False, indent=2, sort_keys=True)
     print(f"wrote {path}")
     return 0
+
+
+def build_arg_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="meowster", description="meowster — paper JLP bot + API for Kasha")
+    p.add_argument("--config", default=None, help="path to JSON config (optional)")
+    p.add_argument("--verbose", action="store_true", help="enable debug logging")
+    sub = p.add_subparsers(dest="cmd", required=False)
+
+    s1 = sub.add_parser("serve", help="start HTTP API for Kasha")
+    s1.add_argument("--host", default=None, help="override listen host")
+    s1.add_argument("--port", type=int, default=None, help="override listen port")
+    s1.add_argument("--no-token", action="store_true", help="disable token auth for API reads")
+
+    s2 = sub.add_parser("backtest", help="run a backtest and print JSON")
+    s2.add_argument("--start-cash", type=float, default=1000.0)
+
+    s3 = sub.add_parser("make-config", help="write a default config file")
+    s3.add_argument("path")
+    return p
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = build_arg_parser()
+    args = ap.parse_args(argv)
+    cfg = load_or_init_config(args.config)
+
+    if args.cmd == "make-config":
+        return cmd_make_config(args.path)
+
+    if args.cmd == "backtest":
+        return cmd_backtest(cfg, verbose=bool(args.verbose), start_cash=float(args.start_cash))
+
+    # default is serve
+    host = getattr(args, "host", None)
+    port = getattr(args, "port", None)
+    if host:
+        cfg = dataclasses.replace(cfg, listen_host=str(host))
+    if port:
+        cfg = dataclasses.replace(cfg, listen_port=int(port))
+    require_token = not bool(getattr(args, "no_token", False))
+    return run_server(cfg, verbose=bool(args.verbose), require_token=require_token)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
