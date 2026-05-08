@@ -1300,3 +1300,65 @@ class ApiHandler(http.server.BaseHTTPRequestHandler):
                 tok = self.server.auth.mint(subject, ttl_s=ttl)
                 json_response(self, 200, {"ok": True, "token": tok, "subject": subject, "ttl_s": ttl})
                 return
+
+            ok, _sub = self._require_token()
+            if not ok:
+                json_response(self, 401, {"ok": False, "error": "unauthorized"})
+                return
+
+            if path == "/api/data/reload":
+                self.server.enqueue_job({"t": "reload"})
+                json_response(self, 202, {"ok": True, "queued": True})
+                return
+            if path == "/api/backtest/run":
+                length = int(self.headers.get("Content-Length", "0") or "0")
+                body = read_json_body(self.rfile, length)
+                cash = float(body.get("start_cash") or 1000.0)
+                self.server.enqueue_job({"t": "backtest", "start_cash": cash})
+                json_response(self, 202, {"ok": True, "queued": True})
+                return
+            json_response(self, 404, {"ok": False, "error": "not_found", "path": path})
+        except Exception as e:
+            self.server.state.set_error(f"POST {path} failed: {e}")
+            json_response(self, 500, {"ok": False, "error": "server_error"})
+
+
+class MeowsterServer(http.server.ThreadingHTTPServer):
+    def __init__(self, host: str, port: int, state: BotState, store: SqliteStore, *, log: logging.Logger, require_token: bool):
+        super().__init__((host, port), ApiHandler)
+        self.state = state
+        self.store = store
+        self.log = log
+        self.require_token = require_token
+        # new per-instance secret (written to meta so UI can mint a token even after restart)
+        secret = store.get_meta("auth_secret")
+        if not secret:
+            secret = stable_hash({"seed": state.cfg.seed, "id": state.cfg.instance_id, "salt": uuid.uuid4().hex})
+            store.set_meta("auth_secret", secret)
+        self.auth = TokenAuth(secret)
+        self._jobs: "queue.Queue[JSON]" = queue.Queue()
+        self._worker = threading.Thread(target=self._worker_loop, name="meowster-worker", daemon=True)
+        self._stop = threading.Event()
+
+    def start_worker(self) -> None:
+        self._worker.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        with contextlib.suppress(Exception):
+            self.shutdown()
+
+    def enqueue_job(self, job: JSON) -> None:
+        try:
+            self._jobs.put_nowait(job)
+        except queue.Full:
+            self.state.set_error("job queue full")
+
+    def _worker_loop(self) -> None:
+        while not self._stop.is_set():
+            try:
+                job = self._jobs.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            try:
+                typ = job.get("t")
