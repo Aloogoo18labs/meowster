@@ -1114,3 +1114,65 @@ class BotState:
     def snapshot(self) -> JSON:
         with self._lock:
             return {
+                "app": self.cfg.appname,
+                "instance_id": self.cfg.instance_id,
+                "status": self._status,
+                "detail": self._status_detail,
+                "last_error": self._last_error,
+                "candles_loaded": len(self.candles),
+                "last_backtest": None if self.last_backtest is None else self.last_backtest.as_json(),
+            }
+
+
+def read_json_body(rfile: io.BufferedReader, content_length: int) -> JSON:
+    data = rfile.read(content_length) if content_length > 0 else b"{}"
+    try:
+        obj = json.loads(data.decode("utf-8"))
+    except json.JSONDecodeError as e:
+        raise MeowsterError(f"invalid JSON: {e}") from e
+    if not isinstance(obj, dict):
+        raise MeowsterError("JSON body must be an object")
+    return t.cast(JSON, obj)
+
+
+def json_response(handler: http.server.BaseHTTPRequestHandler, status: int, payload: JSON, *, headers: dict[str, str] | None = None) -> None:
+    body = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    handler.send_response(status)
+    handler.send_header("Content-Type", "application/json; charset=utf-8")
+    handler.send_header("Content-Length", str(len(body)))
+    handler.send_header("Cache-Control", "no-store")
+    handler.send_header("Access-Control-Allow-Origin", "*")
+    handler.send_header("Access-Control-Allow-Headers", "Content-Type, X-Meowster-Token")
+    handler.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+    if headers:
+        for k, v in headers.items():
+            handler.send_header(k, v)
+    handler.end_headers()
+    handler.wfile.write(body)
+
+
+def text_response(handler: http.server.BaseHTTPRequestHandler, status: int, text: str, *, ctype: str = "text/plain; charset=utf-8") -> None:
+    body = text.encode("utf-8")
+    handler.send_response(status)
+    handler.send_header("Content-Type", ctype)
+    handler.send_header("Content-Length", str(len(body)))
+    handler.send_header("Cache-Control", "no-store")
+    handler.send_header("Access-Control-Allow-Origin", "*")
+    handler.send_header("Access-Control-Allow-Headers", "Content-Type, X-Meowster-Token")
+    handler.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+    handler.end_headers()
+    handler.wfile.write(body)
+
+
+def parse_query(path: str) -> tuple[str, dict[str, str]]:
+    u = urllib.parse.urlparse(path)
+    q = urllib.parse.parse_qs(u.query)
+    flat = {k: (v[0] if v else "") for k, v in q.items()}
+    return u.path, flat
+
+
+class TokenAuth:
+    def __init__(self, secret: str):
+        self.secret = secret.encode("utf-8")
+
+    def mint(self, subject: str, *, ttl_s: int = 3600) -> str:
