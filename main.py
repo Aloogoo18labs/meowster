@@ -494,3 +494,65 @@ class SqliteStore:
         );
 
         CREATE TABLE IF NOT EXISTS orders (
+            order_id TEXT PRIMARY KEY,
+            symbol TEXT NOT NULL,
+            side TEXT NOT NULL,
+            qty REAL NOT NULL,
+            limit_price REAL,
+            tif TEXT NOT NULL,
+            created_ts INTEGER NOT NULL,
+            client_tag TEXT NOT NULL,
+            status TEXT NOT NULL,
+            filled_qty REAL NOT NULL,
+            avg_price REAL NOT NULL,
+            updated_ts INTEGER NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_fills_ts ON fills(ts);
+        CREATE INDEX IF NOT EXISTS idx_orders_ts ON orders(created_ts);
+        """
+        with self._lock:
+            self._conn.executescript(ddl)
+            self._conn.commit()
+
+    def set_meta(self, k: str, v: str) -> None:
+        with self._lock:
+            self._conn.execute("INSERT INTO meta(k, v) VALUES(?, ?) ON CONFLICT(k) DO UPDATE SET v=excluded.v", (k, v))
+            self._conn.commit()
+
+    def get_meta(self, k: str) -> str | None:
+        with self._lock:
+            cur = self._conn.execute("SELECT v FROM meta WHERE k=?", (k,))
+            row = cur.fetchone()
+            return None if row is None else str(row["v"])
+
+    def upsert_candles(self, candles: list[Candle]) -> None:
+        with self._lock:
+            self._conn.executemany(
+                "INSERT INTO candles(ts, open, high, low, close, volume) VALUES(?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(ts) DO UPDATE SET open=excluded.open, high=excluded.high, low=excluded.low, close=excluded.close, volume=excluded.volume",
+                [(c.ts, c.open, c.high, c.low, c.close, c.volume) for c in candles],
+            )
+            self._conn.commit()
+
+    def load_candles(self, *, limit: int | None = None) -> list[Candle]:
+        q = "SELECT ts, open, high, low, close, volume FROM candles ORDER BY ts ASC"
+        params: tuple[t.Any, ...] = ()
+        if limit is not None:
+            q += " LIMIT ?"
+            params = (int(limit),)
+        with self._lock:
+            cur = self._conn.execute(q, params)
+            rows = cur.fetchall()
+        return [Candle(int(r["ts"]), float(r["open"]), float(r["high"]), float(r["low"]), float(r["close"]), float(r["volume"])) for r in rows]
+
+    def insert_order(self, order: Order) -> None:
+        now = int(time.time())
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO orders(order_id, symbol, side, qty, limit_price, tif, created_ts, client_tag, status, filled_qty, avg_price, updated_ts) "
+                "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    order.order_id,
+                    order.symbol,
+                    order.side,
